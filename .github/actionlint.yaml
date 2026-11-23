@@ -1,0 +1,6 @@
+# actionlint 1.7.12 predates GitHub's self-repository syntax (`uses: $/...`, July 2026), which
+# pipesor-ci uses to compose its own reusable workflows at the caller's pinned commit.
+paths:
+  .github/workflows/**/*.yml:
+    ignore:
+      - 'reusable workflow call "\$/\.github/workflows/[a-z-]+\.yml" at "uses" is not following the format'

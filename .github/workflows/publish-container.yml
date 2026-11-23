@@ -1,0 +1,135 @@
+name: Publish verified container
+
+# Publishes the exact archive verified earlier in the same main push run, without rebuilding,
+# keeps the GHCR package private and records the immutable candidate manifest
+# (candidate.json schema 1) consumed by release tooling and environment promotion.
+
+on:
+  workflow_call:
+    inputs:
+      artifact:
+        description: Image archive artifact from container-build.yml.
+        required: true
+        type: string
+    outputs:
+      reference:
+        description: Published ghcr.io/<repository>@sha256:<digest>.
+        value: ${{ jobs.publish.outputs.reference }}
+
+permissions: {}
+
+jobs:
+  publish:
+    name: publish
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      reference: ${{ steps.candidate.outputs.reference }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Validate publication context
+        run: |
+          test "$GITHUB_EVENT_NAME" = push
+          test "$GITHUB_REF" = refs/heads/main
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}:sha-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
+          echo "PACKAGE=${GITHUB_REPOSITORY#*/}" >> "$GITHUB_ENV"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.artifact }}
+
+      - name: Load the tested image
+        run: |
+          sha256sum --check --strict service-image.tar.sha256
+          docker load --input service-image.tar
+          test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
+
+      - name: Keep an existing package private
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          response="$(mktemp)"
+          status="$(curl --silent --show-error --output "$response" --write-out '%{http_code}' \
+            --header 'Accept: application/vnd.github+json' \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            "$GITHUB_API_URL/orgs/$GITHUB_REPOSITORY_OWNER/packages/container/$PACKAGE")"
+          case "$status" in
+            200) test "$(jq --raw-output '.visibility' "$response")" = private ;;
+            404) echo "Package does not exist yet; it is verified after the first push." ;;
+            *) echo "::error::Unexpected package lookup status $status"; exit 1 ;;
+          esac
+
+      - name: Publish without rebuilding
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          docker push "$IMAGE"
+
+      - name: Verify private package visibility
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          visibility=""
+          for _ in {1..10}; do
+            visibility="$(curl --fail --silent --show-error \
+              --header 'Accept: application/vnd.github+json' \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              "$GITHUB_API_URL/orgs/$GITHUB_REPOSITORY_OWNER/packages/container/$PACKAGE" \
+              | jq --raw-output '.visibility')" && break
+            sleep 3
+          done
+          if [ "$visibility" != private ]; then
+            echo "::error::GHCR package $PACKAGE must be private (found '${visibility:-unknown}')"
+            exit 1
+          fi
+
+      - name: Record immutable candidate
+        id: candidate
+        run: |
+          docker image inspect "$IMAGE" --format '{{index .RepoDigests 0}}' > published-reference.txt
+          python3 - <<'PYTHON'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          image = os.environ['IMAGE'].rsplit(':', 1)[0]
+          expected = f"ghcr.io/{os.environ['GITHUB_REPOSITORY'].lower()}"
+          if image != expected:
+              raise SystemExit('Image does not match the caller repository')
+          reference = Path('published-reference.txt').read_text().strip()
+          if not re.fullmatch(re.escape(expected) + r'@sha256:[0-9a-f]{64}', reference):
+              raise SystemExit('Published digest does not match the candidate repository')
+          candidate = {
+              'schema_version': 1,
+              'source_sha': os.environ['GITHUB_SHA'],
+              'image': image,
+              'digest': reference.split('@', 1)[1],
+              'build_run_id': os.environ['GITHUB_RUN_ID'],
+              'build_run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+          }
+          Path('candidate.json').write_text(json.dumps(candidate, indent=2) + '\n')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f"reference={reference}\n")
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write(f"Published candidate: `{reference}`\n\nSource: `{candidate['source_sha']}`\n")
+          PYTHON
+
+      - name: Store candidate handoff
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: candidate.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Remove registry credentials
+        if: always()
+        run: docker logout ghcr.io

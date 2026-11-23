@@ -1,0 +1,137 @@
+name: Conventions
+
+# Organization-wide contribution checks: canonical commit tooling, Conventional Commits for
+# PR titles/bodies/commits and the integrated main commit, and workflow linting.
+# Callers must trigger on pull_request types [opened, synchronize, reopened, edited] so title
+# and description edits are re-validated.
+
+on:
+  workflow_call: {}
+
+permissions: {}
+
+env:
+  LEFTHOOK_VERSION: 2.2.2
+  ACTIONLINT_VERSION: 1.7.12
+  ZIZMOR_VERSION: 1.33.1
+  ZIZMOR_SHA256: 3e6a301c7a820a2501915f5a9de8c0486da82bdec7965f068477538a98743d43
+  PR_TITLE_MAX_LENGTH: 65
+
+jobs:
+  conventions:
+    name: conventions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+
+      - name: Install verified tools
+        run: |
+          bin="$RUNNER_TEMP/bin"
+          mkdir -p "$bin" "$RUNNER_TEMP/downloads"
+          cd "$RUNNER_TEMP/downloads"
+          lefthook="lefthook_${LEFTHOOK_VERSION}_Linux_x86_64"
+          base="https://github.com/evilmartians/lefthook/releases/download/v${LEFTHOOK_VERSION}"
+          curl --fail --silent --show-error --location --remote-name "$base/$lefthook"
+          curl --fail --silent --show-error --location --output lefthook-checksums.txt "$base/lefthook_checksums.txt"
+          grep "  ${lefthook}\$" lefthook-checksums.txt | sha256sum --check --strict -
+          install -m 755 "$lefthook" "$bin/lefthook"
+          actionlint="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          base="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}"
+          curl --fail --silent --show-error --location --remote-name "$base/$actionlint"
+          curl --fail --silent --show-error --location --remote-name "$base/actionlint_${ACTIONLINT_VERSION}_checksums.txt"
+          grep " ${actionlint}\$" "actionlint_${ACTIONLINT_VERSION}_checksums.txt" | sha256sum --check --strict -
+          tar -xzf "$actionlint" actionlint
+          install -m 755 actionlint "$bin/actionlint"
+          zizmor="zizmor-x86_64-unknown-linux-gnu.tar.gz"
+          curl --fail --silent --show-error --location --remote-name \
+            "https://github.com/zizmorcore/zizmor/releases/download/v${ZIZMOR_VERSION}/$zizmor"
+          echo "${ZIZMOR_SHA256}  $zizmor" | sha256sum --check --strict -
+          tar -xzf "$zizmor"
+          install -m 755 "$(find . -name zizmor -type f | head -n 1)" "$bin/zizmor"
+          echo "$bin" >> "$GITHUB_PATH"
+
+      - name: Install repository commit tooling
+        run: bun install --frozen-lockfile
+
+      - name: Require the canonical commit tooling
+        run: |
+          cat > "$RUNNER_TEMP/commitlint.config.js" <<'CONFIG'
+          export default {
+            extends: ['@commitlint/config-conventional'],
+            defaultIgnores: false,
+            rules: {
+              'header-max-length': [2, 'always', 72],
+              'scope-case': [2, 'always', 'lower-case'],
+              'body-max-line-length': [0],
+              'footer-max-line-length': [0],
+            },
+          };
+          CONFIG
+          cat > "$RUNNER_TEMP/lefthook.yml" <<'CONFIG'
+          # yaml-language-server: $schema=https://lefthook.dev/schema.json
+          min_version: 2.2.2
+
+          commit-msg:
+            jobs:
+              - name: commitlint
+                run: bun run commitlint --edit "{1}"
+          CONFIG
+          status=0
+          for file in commitlint.config.js lefthook.yml; do
+            if ! diff -u "$RUNNER_TEMP/$file" "$file"; then
+              echo "::error file=$file::$file must match the canonical pipesor-ci version"
+              status=1
+            fi
+          done
+          exit "$status"
+
+      - run: lefthook validate
+
+      - name: Lint workflows
+        run: actionlint -color
+
+      - name: Audit workflow security
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: zizmor --min-severity medium --format github .
+
+      - name: Validate pull request title and squash message
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if [ "${#PR_TITLE}" -gt "$PR_TITLE_MAX_LENGTH" ]; then
+            echo "::error::PR title has ${#PR_TITLE} characters; keep it within $PR_TITLE_MAX_LENGTH so the squash header with ' (#NNN)' stays within 72"
+            exit 1
+          fi
+          if [ -z "${PR_BODY//[[:space:]]/}" ]; then
+            echo "::error::PR description is empty; follow the organization pull request template"
+            exit 1
+          fi
+          printf '%s\n' "$PR_TITLE" | bun run commitlint
+          printf '%s\n\n%s\n' "$PR_TITLE" "$PR_BODY" | bun run commitlint
+
+      - name: Validate pull request commits
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bun run commitlint --from "$BASE_SHA" --to "$HEAD_SHA"
+
+      - name: Validate integrated commit
+        if: github.event_name == 'push'
+        run: bun run commitlint --last
