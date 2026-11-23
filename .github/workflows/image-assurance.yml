@@ -59,9 +59,11 @@ jobs:
               -v "$GITHUB_WORKSPACE:/src:ro" \
               "$TRIVY_IMAGE" "$@"
           }
-          trivy image --quiet --input /image/service-image.tar --format cyclonedx --output /evidence/sbom.cdx.json
-          trivy image --quiet --skip-db-update --input /image/service-image.tar --scanners vuln \
+          # The vulnerability report downloads the vulnerability and Java databases once for the job.
+          trivy image --quiet --input /image/service-image.tar --scanners vuln \
             --format json --output /evidence/vulnerabilities.json
+          trivy image --quiet --skip-db-update --skip-java-db-update --input /image/service-image.tar \
+            --format cyclonedx --output /evidence/sbom.cdx.json
 
       - name: Block fixable vulnerabilities
         env:
@@ -75,7 +77,7 @@ jobs:
             -v "$RUNNER_TEMP/image:/image:ro" \
             -v "$RUNNER_TEMP/trivy-cache:/root/.cache/trivy" \
             -v "$GITHUB_WORKSPACE:/src:ro" \
-            "$TRIVY_IMAGE" image --quiet --skip-db-update --input /image/service-image.tar --scanners vuln \
+            "$TRIVY_IMAGE" image --quiet --skip-db-update --skip-java-db-update --input /image/service-image.tar --scanners vuln \
             --severity "$FAIL_SEVERITIES" --ignore-unfixed "${ignore[@]}" --exit-code 1 --format table
 
       - name: Retain assurance evidence
