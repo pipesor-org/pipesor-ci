@@ -1,0 +1,90 @@
+name: Release candidate
+description: >-
+  Name an existing published candidate digest with a SemVer tag and GitHub Release, without
+  rebuilding or mutating registry tags. Stable releases require retained preprod validation.
+
+inputs:
+  mode:
+    description: plan (local files only) or publish (creates the tag and Release; needs release-enabled).
+    required: false
+    default: plan
+  kind:
+    description: rc or stable.
+    required: true
+  version:
+    description: Explicit X.Y.Z target before a 1.x stable base; empty afterwards.
+    required: false
+    default: ''
+  candidate-run-id:
+    description: Original successful main CI run.
+    required: false
+    default: ''
+  candidate-run-attempt:
+    description: Original successful main CI attempt.
+    required: false
+    default: ''
+  candidate-release:
+    description: Published RC/stable whose manifest is selected instead of a CI artifact.
+    required: false
+    default: ''
+  confirm-image:
+    description: Exact ghcr.io/<repository>@sha256:<digest> being named.
+    required: true
+  authorization-ref:
+    description: Repository issue/PR URL recording the publication authorization.
+    required: true
+  release-enabled:
+    description: Repository-level activation flag (vars.RELEASE_ENABLED).
+    required: false
+    default: 'false'
+  github-token:
+    description: Token with contents write (publish) and actions/deployments read.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      with:
+        bun-version: 1.4.4
+
+    - name: Install release tooling and repository conventions
+      shell: bash
+      run: |
+        bun install --frozen-lockfile --cwd "$GITHUB_ACTION_PATH/../.."
+        bun install --frozen-lockfile
+
+    - name: Get the retained candidate and its original CI attempt
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        CANDIDATE_RUN_ID: ${{ inputs.candidate-run-id }}
+        CANDIDATE_RUN_ATTEMPT: ${{ inputs.candidate-run-attempt }}
+        CANDIDATE_RELEASE: ${{ inputs.candidate-release }}
+      run: |
+        python3 "$GITHUB_ACTION_PATH/candidate.py" fetch \
+          --candidate .delivery/candidate/candidate.json --run .delivery/candidate-run.json
+
+    - name: Name the existing digest, never rebuild
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        MODE: ${{ inputs.mode }}
+        RELEASE_KIND: ${{ inputs.kind }}
+        REQUESTED_VERSION: ${{ inputs.version }}
+        CANDIDATE_RELEASE: ${{ inputs.candidate-release }}
+        CONFIRM_IMAGE: ${{ inputs.confirm-image }}
+        AUTHORIZATION_REF: ${{ inputs.authorization-ref }}
+        RELEASE_ENABLED: ${{ inputs.release-enabled }}
+      run: |
+        bun "$GITHUB_ACTION_PATH/release.mjs" "$MODE" --candidate .delivery/candidate/candidate.json \
+          --run .delivery/candidate-run.json --kind "$RELEASE_KIND" --version "$REQUESTED_VERSION"
+
+    - name: Preserve the release plan even on partial publication
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: release-plan-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .delivery/release/
+        if-no-files-found: ignore
+        retention-days: 90

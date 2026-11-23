@@ -1,0 +1,142 @@
+name: Container build
+
+# Verifies the repository, builds the candidate image once, runs the generic and
+# repository-specific image checks and hands the exact tested archive to later jobs of
+# the same run (image assurance and publication). Nothing is pushed here.
+
+on:
+  workflow_call:
+    inputs:
+      verify-command:
+        description: Repository verification (dependencies, tests, packaging) run with bash before the image build.
+        required: true
+        type: string
+      image-check-command:
+        description: Repository image checks run with bash after the build; IMAGE holds the candidate reference.
+        required: false
+        type: string
+        default: python3 tools/check_image.py "$IMAGE"
+      java-version:
+        description: Temurin JDK to install with the Maven cache; empty skips Java.
+        required: false
+        type: string
+        default: ''
+      python-version:
+        description: Python used by the verification and image checks.
+        required: false
+        type: string
+        default: '3.14.8'
+      pip-cache:
+        description: Cache pip downloads (Python projects with pyproject.toml).
+        required: false
+        type: boolean
+        default: false
+      test-reports:
+        description: Glob of test reports retained for 14 days; empty skips the upload.
+        required: false
+        type: string
+        default: ''
+      timeout-minutes:
+        description: Job timeout.
+        required: false
+        type: number
+        default: 30
+    outputs:
+      image:
+        description: Technical candidate tag ghcr.io/<repository>:sha-<sha>-<run>-<attempt>.
+        value: ${{ jobs.build.outputs.image }}
+      artifact:
+        description: Name of the artifact holding the tested image archive and its checksum.
+        value: ${{ jobs.build.outputs.artifact }}
+
+permissions: {}
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+      artifact: ${{ steps.image.outputs.artifact }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: ${{ inputs.pip-cache && 'pip' || '' }}
+
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        if: inputs.java-version != ''
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+          cache: maven
+
+      - name: Verify
+        env:
+          VERIFY_COMMAND: ${{ inputs.verify-command }}
+        run: eval "$VERIFY_COMMAND"
+
+      - name: Store test reports
+        if: always() && inputs.test-reports != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tests-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ inputs.test-reports }}
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Build and check the candidate image
+        id: image
+        env:
+          IMAGE_CHECK_COMMAND: ${{ inputs.image-check-command }}
+        run: |
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}:sha-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          export IMAGE
+          docker build --platform linux/amd64 --provenance=false --build-arg "VCS_REF=$GITHUB_SHA" --tag "$IMAGE" .
+          revision="$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
+          if [ "$revision" != "$GITHUB_SHA" ]; then
+            echo "::error::The image must label org.opencontainers.image.revision with the VCS_REF build argument"
+            exit 1
+          fi
+          user="$(docker image inspect "$IMAGE" --format '{{.Config.User}}')"
+          case "${user%%:*}" in
+            '' | root | 0)
+              echo "::error::The image must run as a non-root user (found '${user}')"
+              exit 1
+              ;;
+          esac
+          eval "$IMAGE_CHECK_COMMAND"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "artifact=image-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+
+      - name: Save the tested image
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+        run: |
+          docker save --output service-image.tar "$IMAGE"
+          sha256sum service-image.tar > service-image.tar.sha256
+
+      - name: Hand over the exact tested image
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.image.outputs.artifact }}
+          path: |
+            service-image.tar
+            service-image.tar.sha256
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 6

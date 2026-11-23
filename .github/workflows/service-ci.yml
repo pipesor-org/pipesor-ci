@@ -1,0 +1,92 @@
+name: Service CI
+
+# Complete CI for a repository delivered as a container image:
+# conventions → verify/build/check once → image assurance → (main push) publish the same
+# archive to GHCR and record candidate.json. Callers grant contents: read and packages: write.
+
+on:
+  workflow_call:
+    inputs:
+      verify-command:
+        description: Repository verification (dependencies, tests, packaging) run with bash before the image build.
+        required: true
+        type: string
+      image-check-command:
+        description: Repository image checks run with bash after the build; IMAGE holds the candidate reference.
+        required: false
+        type: string
+        default: python3 tools/check_image.py "$IMAGE"
+      java-version:
+        description: Temurin JDK to install with the Maven cache; empty skips Java.
+        required: false
+        type: string
+        default: ''
+      python-version:
+        description: Python used by the verification and image checks.
+        required: false
+        type: string
+        default: '3.14.8'
+      pip-cache:
+        description: Cache pip downloads (Python projects with pyproject.toml).
+        required: false
+        type: boolean
+        default: false
+      test-reports:
+        description: Glob of test reports retained for 14 days; empty skips the upload.
+        required: false
+        type: string
+        default: ''
+      fail-severities:
+        description: Severities that block when a fixed version exists.
+        required: false
+        type: string
+        default: HIGH,CRITICAL
+      timeout-minutes:
+        description: Build job timeout.
+        required: false
+        type: number
+        default: 30
+    outputs:
+      reference:
+        description: Published ghcr.io/<repository>@sha256:<digest> (main pushes only).
+        value: ${{ jobs.publish.outputs.reference }}
+
+permissions: {}
+
+jobs:
+  conventions:
+    uses: $/.github/workflows/conventions.yml
+    permissions:
+      contents: read
+
+  build:
+    uses: $/.github/workflows/container-build.yml
+    permissions:
+      contents: read
+    with:
+      verify-command: ${{ inputs.verify-command }}
+      image-check-command: ${{ inputs.image-check-command }}
+      java-version: ${{ inputs.java-version }}
+      python-version: ${{ inputs.python-version }}
+      pip-cache: ${{ inputs.pip-cache }}
+      test-reports: ${{ inputs.test-reports }}
+      timeout-minutes: ${{ inputs.timeout-minutes }}
+
+  assurance:
+    needs: build
+    uses: $/.github/workflows/image-assurance.yml
+    permissions:
+      contents: read
+    with:
+      artifact: ${{ needs.build.outputs.artifact }}
+      fail-severities: ${{ inputs.fail-severities }}
+
+  publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [conventions, build, assurance]
+    uses: $/.github/workflows/publish-container.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      artifact: ${{ needs.build.outputs.artifact }}
