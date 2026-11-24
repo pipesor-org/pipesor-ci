@@ -16,6 +16,7 @@ common pipeline.
 | [`container-build.yml`](.github/workflows/container-build.yml) | Reusable workflow | Runs the repository verification, builds `ghcr.io/<repo>:sha-<sha>-<run>-<attempt>` once, checks the OCI revision label and a non-root user, runs the repository image checks and hands the exact archive to later jobs (1-day artifact). |
 | [`image-assurance.yml`](.github/workflows/image-assurance.yml) | Reusable workflow | Trivy CycloneDX SBOM and vulnerability report of that archive (90-day evidence) and a gate on **fixable HIGH/CRITICAL** vulnerabilities. Reviewed exceptions live in the repository's `.trivyignore.yaml`. |
 | [`publish-container.yml`](.github/workflows/publish-container.yml) | Reusable workflow | Main pushes only: loads the verified archive, keeps the GHCR package private, pushes without rebuilding and records `candidate-<run>-<attempt>/candidate.json` (90 days). |
+| [`registry-retention.yml`](.github/workflows/registry-retention.yml) + [`actions/registry-retention`](actions/registry-retention/retention.py) | Reusable workflow | Weekly GHCR inventory and retention for the caller's package: dry run by default, deletes only old, unprotected technical candidates (see below). |
 | [`actions/release`](actions/release/action.yml) | Composite action | Names an existing candidate digest with `vX.Y.Z[-rc.N]` and a GitHub Release (`candidate.json` asset). Never rebuilds or retags the registry; stable requires retained preprod validation. |
 
 Callers stay thin. A Java service, for example:
@@ -78,6 +79,54 @@ Every consuming repository has:
   (dev → qa → preprod → prod). Rollback is a new reviewed plan with the earlier digest.
 - Releases are optional names for a digest. The release workflow in each service is disabled in
   source until activation is authorized; stable requires the preprod validation contract.
+
+## Registry retention
+
+Every image repository calls `registry-retention.yml` weekly (and on demand). Each run uploads a
+90-day JSON report and writes a summary; it **keeps** a version when any rule applies:
+
+| Rule | Source |
+|---|---|
+| Current and the last 3 previous distinct deployed digests of every environment | History of `environments/*/images.json` in pipesor-iac |
+| Named by a release | `candidate.json` of every GitHub Release, and commits carrying a `v*` tag |
+| Not exclusively technical tags (`sha-<sha>[-<run>-<attempt>]`) | Package version tags |
+| Among the 10 newest technical candidates, or younger than 30 days | Package inventory |
+| Platform or attestation manifest of a kept image index | Registry manifests (older images are OCI indexes whose children appear as untagged versions) |
+| Listed in `protected-digests` | Caller input |
+
+Children of a deleted index are deleted after it; untagged orphans go once older than the age limit.
+Any unreadable input (IaC history, releases, manifests, inventory) stops the run before deleting, and
+a plan larger than `max-deletions` (100) is refused. Policy floors: 7 days, 3 candidates, 1 previous
+deployment.
+
+```yaml
+name: Registry retention
+
+on:
+  schedule:
+    - cron: '23 6 * * 1'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: registry-retention
+  cancel-in-progress: false
+
+jobs:
+  retention:
+    uses: pipesor-org/pipesor-ci/.github/workflows/registry-retention.yml@<full commit SHA> # v1.1.0
+    permissions:
+      contents: read
+      packages: write
+    with:
+      delete: ${{ vars.REGISTRY_RETENTION_DELETE == 'true' }}
+```
+
+Deletion stays off until the repository variable `REGISTRY_RETENTION_DELETE` is `true`. Before
+enabling it, review a few dry-run reports and give the repository the **Admin** role in the package's
+*Manage Actions access* settings (`GITHUB_TOKEN` can only delete versions of packages it administers).
+GitHub can restore a deleted version for 30 days from the package settings.
 
 ## Versioning and consumption
 

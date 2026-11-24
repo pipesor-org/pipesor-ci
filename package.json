@@ -6,7 +6,7 @@
   "scripts": {
     "setup:hooks": "lefthook install",
     "commitlint": "bun ./node_modules/@commitlint/cli/cli.js",
-    "test": "bun test actions/ && python3 -m unittest discover -s actions/release -p 'test_*.py'"
+    "test": "bun test actions/ && python3 -m unittest discover -s actions/release -p 'test_*.py' && python3 -m unittest discover -s actions/registry-retention -p 'test_*.py'"
   },
   "dependencies": {
     "@commitlint/load": "21.2.4",
