@@ -1,0 +1,59 @@
+name: Registry retention
+description: >-
+  Plan GHCR retention for the calling repository's container package from its deployments
+  (IaC images.json history), releases and registry inventory; delete only when explicitly enabled.
+
+inputs:
+  iac-path:
+    description: Checkout of the IaC repository with full history (environments/*/images.json).
+    required: true
+  delete:
+    description: "'true' deletes the planned versions; anything else is a dry run."
+    required: false
+    default: 'false'
+  min-age-days:
+    description: Versions younger than this are kept (floor 7).
+    required: false
+    default: '30'
+  keep-recent:
+    description: Newest technical candidates always kept (floor 3).
+    required: false
+    default: '10'
+  keep-deployed:
+    description: Previous distinct deployed digests kept per environment besides the current one (floor 1).
+    required: false
+    default: '3'
+  max-deletions:
+    description: The run stops before deleting when the plan exceeds this number of versions.
+    required: false
+    default: '100'
+  protected-digests:
+    description: Extra sha256 digests to keep, separated by spaces or commas.
+    required: false
+    default: ''
+  report-path:
+    description: Where the JSON report is written.
+    required: false
+    default: registry-retention.json
+  github-token:
+    description: Token with packages read (write to delete) and contents read on the calling repository.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Plan and apply retention
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        IAC_PATH: ${{ inputs.iac-path }}
+        DELETE: ${{ inputs.delete }}
+        MIN_AGE_DAYS: ${{ inputs.min-age-days }}
+        KEEP_RECENT: ${{ inputs.keep-recent }}
+        KEEP_DEPLOYED: ${{ inputs.keep-deployed }}
+        MAX_DELETIONS: ${{ inputs.max-deletions }}
+        PROTECTED_DIGESTS: ${{ inputs.protected-digests }}
+        REPORT_PATH: ${{ inputs.report-path }}
+      run: |
+        export PACKAGE_OWNER="$GITHUB_REPOSITORY_OWNER" PACKAGE_NAME="${GITHUB_REPOSITORY#*/}" REPOSITORY="$GITHUB_REPOSITORY"
+        python3 "$GITHUB_ACTION_PATH/retention.py"

@@ -1,0 +1,85 @@
+name: Registry retention
+
+# Keeps the calling repository's GHCR package tidy without breaking deployments, rollbacks or releases.
+# Protected: current and recent deployed digests of every pipesor-iac environments/*/images.json,
+# release manifests and v* tag commits, non-technical tags, the newest candidates, recent versions and
+# the children of every kept image index. Dry run unless the caller passes delete: true.
+
+on:
+  workflow_call:
+    inputs:
+      delete:
+        description: Delete the planned versions (requires the repository to have Admin Actions access on its package).
+        required: false
+        type: boolean
+        default: false
+      min-age-days:
+        description: Versions younger than this are kept (floor 7).
+        required: false
+        type: number
+        default: 30
+      keep-recent:
+        description: Newest technical candidates always kept (floor 3).
+        required: false
+        type: number
+        default: 10
+      keep-deployed:
+        description: Previous distinct deployed digests kept per environment (floor 1).
+        required: false
+        type: number
+        default: 3
+      max-deletions:
+        description: Stop before deleting when the plan exceeds this number of versions.
+        required: false
+        type: number
+        default: 100
+      protected-digests:
+        description: Extra sha256 digests to keep, separated by spaces or commas.
+        required: false
+        type: string
+        default: ''
+      iac-repository:
+        description: Repository holding environments/*/images.json.
+        required: false
+        type: string
+        default: pipesor-org/pipesor-iac
+
+permissions: {}
+
+jobs:
+  retention:
+    name: retention
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ inputs.iac-repository }}
+          ref: main
+          fetch-depth: 0
+          path: iac
+          persist-credentials: false
+
+      - uses: $/actions/registry-retention
+        with:
+          iac-path: iac
+          delete: ${{ inputs.delete }}
+          min-age-days: ${{ inputs.min-age-days }}
+          keep-recent: ${{ inputs.keep-recent }}
+          keep-deployed: ${{ inputs.keep-deployed }}
+          max-deletions: ${{ inputs.max-deletions }}
+          protected-digests: ${{ inputs.protected-digests }}
+          report-path: ${{ runner.temp }}/registry-retention.json
+          github-token: ${{ github.token }}
+
+      - name: Retain the retention report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: registry-retention-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/registry-retention.json
+          if-no-files-found: ignore
+          retention-days: 90
